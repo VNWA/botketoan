@@ -1,0 +1,58 @@
+3️⃣ Hướng dẫn cho Super Admin
+
+Super Admin là người có quyền quản lý user, được khai báo trong .env.
+
+Các lệnh Super Admin:
+Lệnh	Chức năng
+/help_admin	Hiển thị hướng dẫn lệnh quản lý user và bot
+/add_user <username>	Thêm user mới vào hệ thống
+/list_user	Xem danh sách user hiện tại
+/remove_user <username>	Xóa user khỏi hệ thống
+/help	Xem hướng dẫn bot cơ bản
+Nhập trực tiếp +1000 hoặc -500	Ghi giao dịch tăng/giảm tiền
+
+Ví dụ:
+
+/add_user john123 → Thêm user john123
+
+/remove_user jane456 → Xóa user jane456
+
+4️⃣ Hướng dẫn cho user
+
+User  không thể quản lý user khác, chỉ thao tác với phiên và giao dịch.
+
+Các lệnh User:
+Lệnh	Chức năng
+/start	Mở phiên mới để bắt đầu ghi giao dịch
+/close	Đóng phiên hiện tại
+/data	Xem thông tin phiên hiện tại
+/ck <giá trị>	Cập nhật chiết khấu (%)
+/tigia <giá trị>	Cập nhật tỉ giá
+Nhập trực tiếp +1000 hoặc -500	Ghi giao dịch tăng/giảm tiền
+
+Ví dụ:
+
+/start → Bắt đầu phiên mới
+
++500 → Ghi thêm 500 vào phiên hiện tại
+
+-200 → Trừ 200 từ phiên hiện tại
+
+/data → Xem tổng tiền, chiết khấu, tỉ giá
+
+Lưu ý: User chỉ thao tác được với phiên của mình, không thay đổi phiên của người khác.
+
+5️⃣ Mẹo sử dụng
+
+Super Admin nên thêm các user trước khi họ dùng bot.
+
+Luôn nhập giao dịch theo cú pháp +số hoặc -số để bot nhận đúng.
+
+Sử dụng /help và /help_admin để xem hướng dẫn trực tiếp trong Telegram.
+
+Tất cả dữ liệu được lưu trong database mà bạn cấu hình trong database.models.
+
+Nếu bạn muốn, mình có thể viết bản hướng dẫn ngắn gọn dạng cheat sheet để Super Admin và User copy paste trực tiếp vào Telegram, dễ dùng hơn.
+
+Bạn có muốn mình làm luôn không?
+dungquentenanh142@gmail.com

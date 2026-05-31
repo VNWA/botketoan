@@ -1,0 +1,9 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Linux: share host network so DB_HOST=localhost works for host PostgreSQL.
+    network_mode: host
+    command: python bot.py
