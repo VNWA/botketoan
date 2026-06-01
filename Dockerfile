@@ -14,5 +14,6 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
 
-# Mặc định khi `docker run` không kèm command. Với docker-compose xem docker-compose.yml (có thể thêm tong_ket_bot).
+# `docker compose up` chạy 2 service (bot + tong_ket_bot), cùng image này, khác command — xem docker-compose.yml.
+# `docker run …` không compose: mặc định chỉ bot nhóm (override: docker run … python tong_ket_bot.py).
 CMD ["python", "bot.py"]

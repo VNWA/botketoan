@@ -40,12 +40,19 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    token = (os.getenv("TONG_KET_TOAN_TOKEN") or "").strip()
-    if not token:
-        print("Thiếu TONG_KET_TOAN_TOKEN trong .env")
-        return
     init_db()
     ensure_env_super_admin_users()
+
+    token = (os.getenv("TONG_KET_TOAN_TOKEN") or "").strip()
+    if not token:
+        logger.warning(
+            "Thiếu TONG_KET_TOAN_TOKEN — không khởi động Telegram; container vẫn chạy (chỉnh .env rồi restart service tong_ket_bot)."
+        )
+        import time
+
+        while True:
+            time.sleep(86400)
+
     app = ApplicationBuilder().token(token).concurrent_updates(_telegram_concurrent_updates_tongket()).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
