@@ -1,26 +1,67 @@
 from telegram import Update
 from telegram.ext import ContextTypes
-from database.models import DB
-from utils import is_super_admin, auth_required, SUPER_ADMIN
+from database.models import DB, set_user_role
+from utils import is_super_admin, auth_required, SUPER_ADMIN, SUPER_ADMIN2
 
 
 class User:
     @staticmethod
     @auth_required
     async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if len(context.args) != 1:
-            return await update.message.reply_text("⚠️ Dùng lệnh: /add_user <@username>")
+        args = list(context.args or [])
+        if not args:
+            return await update.message.reply_text(
+                "⚠️ Dùng lệnh: /add_user <tên> [user|admin|viewer]\n"
+                "Ví dụ:\n"
+                "• /add_user linganh  → user thường\n"
+                "• /add_user ling anh viewer  → tên «ling anh», chỉ xem data/help\n"
+                "• /add_user thinh admin  → admin tổng (bảng admins, như add_admin)\n"
+                "Token cuối nếu là user / admin / viewer thì là role; mặc định không truyền = user."
+            )
 
-        username = context.args[0].replace("@", "")
+        valid_roles = frozenset(("user", "admin", "viewer"))
+        if args[-1].strip().lower() in valid_roles and len(args) >= 2:
+            role_arg = args[-1].strip().lower()
+            name_tokens = args[:-1]
+        else:
+            role_arg = "user"
+            name_tokens = args
 
-        # Chỉ super admin mới được thêm user
+        username = " ".join(name_tokens).replace("@", "").strip()
+        if not username:
+            return await update.message.reply_text("⚠️ Username không hợp lệ.")
+
+        # Chỉ super admin mới được thêm / đổi user
         if not is_super_admin(update.effective_user.username):
             return await update.message.reply_text("❌ Bạn không có quyền thực hiện lệnh này.")
 
-        # Thêm user mới (nếu chưa tồn tại)
-        user = DB.table("users").first_or_create({"username": username})
+        existing = DB.table("users").where("username", username).first()
+        if not existing:
+            initial = "viewer" if role_arg == "viewer" else "user"
+            DB.table("users").insert({"username": username, "role": initial})
 
-        await update.message.reply_text(f"✅ @{username} đã được thêm vào hệ thống")
+        if role_arg == "admin":
+            set_user_role(username, "user")
+            if not DB.table("admins").where("username", username).first():
+                DB.table("admins").insert({"username": username})
+            await update.message.reply_text(
+                f"✅ @{username} — <b>admin tổng</b> (đã ghi bảng admins, quyền như /add_admin).",
+                parse_mode="HTML",
+            )
+        elif role_arg == "viewer":
+            set_user_role(username, "viewer")
+            DB.table("admins").where("username", username).delete()
+            await update.message.reply_text(
+                f"✅ @{username} — role <b>viewer</b> (chỉ data/help; đã gỡ admin tổng nếu có).",
+                parse_mode="HTML",
+            )
+        else:
+            set_user_role(username, "user")
+            DB.table("admins").where("username", username).delete()
+            await update.message.reply_text(
+                f"✅ @{username} — role <b>user</b> (đã gỡ admin tổng nếu có).",
+                parse_mode="HTML",
+            )
 
     @staticmethod
     @auth_required
@@ -43,10 +84,31 @@ class User:
             return await update.message.reply_text("📭 Chưa có user nào (không tính admin).")
 
         text = "👑 Danh sách user:\n" + "\n".join(
-            [f"- @{u['username']}" for u in regular_users]
+            [
+                f"- @{u['username']}"
+                + (" (viewer — chỉ xem data/help)" if (u.get("role") or "").lower() == "viewer" else "")
+                for u in regular_users
+            ]
         )
 
         await update.message.reply_text(text)
+
+    @staticmethod
+    @auth_required
+    async def list_viewer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not is_super_admin(update.effective_user.username):
+            return await update.message.reply_text("❌ Bạn không có quyền thực hiện lệnh này.")
+
+        rows = DB.table("users").where("role", "viewer").order_by("username", "ASC").get()
+        viewers = [u for u in (rows or []) if u.get("username")]
+
+        if not viewers:
+            return await update.message.reply_text("📭 Chưa có tài khoản viewer nào.")
+
+        text = "👀 <b>Danh sách viewer</b> (chỉ data / help):\n" + "\n".join(
+            f"- @{u['username']}" for u in viewers
+        )
+        await update.message.reply_text(text, parse_mode="HTML")
 
     @staticmethod
     @auth_required
@@ -122,26 +184,33 @@ class User:
         # Lấy danh sách admin từ database
         admins = DB.table("admins").get()
         
-        # Lấy super admin từ env
-        super_admin_username = None
+        # Super admin từ .env (có thể nhiều biến)
+        env_supers: list[tuple[str, str]] = []
         if SUPER_ADMIN:
-            super_admin_username = SUPER_ADMIN.lower()
+            env_supers.append((SUPER_ADMIN.lower(), SUPER_ADMIN))
+        if SUPER_ADMIN2:
+            low2 = SUPER_ADMIN2.lower()
+            if not any(low2 == e[0] for e in env_supers):
+                env_supers.append((low2, SUPER_ADMIN2))
 
-        if not admins and not super_admin_username:
+        if not admins and not env_supers:
             return await update.message.reply_text("📭 Chưa có admin tổng nào.")
 
         text_lines = ["👑 Danh sách admin tổng:"]
-        
-        # Thêm super admin từ env nếu có
-        if super_admin_username:
-            text_lines.append(f"- @{SUPER_ADMIN} (Super Admin từ cấu hình)")
-        
+
+        if len(env_supers) == 1:
+            text_lines.append(f"- @{env_supers[0][1]} (Super Admin từ cấu hình .env)")
+        else:
+            for i, (_, disp) in enumerate(env_supers, start=1):
+                text_lines.append(f"- @{disp} (Super Admin {i} từ cấu hình .env)")
+
+        env_lower = {e[0] for e in env_supers}
+
         # Thêm các admin từ database
         for admin in admins:
-            if 'username' in admin:
-                username = admin['username']
-                # Không hiển thị trùng nếu đã có trong super admin
-                if not super_admin_username or username.lower() != super_admin_username:
+            if "username" in admin:
+                username = admin["username"]
+                if username.lower() not in env_lower:
                     text_lines.append(f"- @{username}")
 
         await update.message.reply_text("\n".join(text_lines))

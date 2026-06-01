@@ -4,18 +4,39 @@ import os
 import re
 from dotenv import load_dotenv
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
-from database.models import init_db, DB, purge_closed_sessions_older_than_days
+from database.models import (
+    init_db,
+    DB,
+    purge_closed_sessions_older_than_days,
+    purge_processed_telegram_updates_older_than_days,
+)
 from handlers.user import User
 from handlers.session import Session
 from handlers.transaction import Transaction
+from utils import ensure_env_super_admin_users, get_user_role
 
 load_dotenv()
-SUPER_ADMIN = os.getenv("SUPER_ADMIN")  # username super admin
 PURGE_CLOSED_DAYS = int(os.getenv("PURGE_CLOSED_DAYS", "3"))
 PURGE_INTERVAL_SEC = int(os.getenv("PURGE_INTERVAL_SEC", "3600"))
 PURGE_START_DELAY_SEC = int(os.getenv("PURGE_START_DELAY_SEC", "120"))
+IDEM_PURGE_DAYS = int(os.getenv("IDEM_PURGE_DAYS", "14"))
 
 logger = logging.getLogger(__name__)
+
+
+def _telegram_concurrent_updates():
+    """Nhiều nhóm song song: số worker (1–256), hoặc true/false."""
+    raw = (os.getenv("TELEGRAM_CONCURRENT_UPDATES") or "24").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("true", "yes", "on"):
+        return True
+    try:
+        n = int(raw)
+        return max(1, min(n, 256))
+    except ValueError:
+        return 24
+
 
 # Global handlers so they can be reused for both slash commands and plain text commands
 user_handler = User()
@@ -24,13 +45,7 @@ transaction_handler = Transaction()
 
 def init():
     init_db()
-    if SUPER_ADMIN:
-        # Check if super admin already exists
-        if not DB.table("users").where("username", SUPER_ADMIN).exists():
-            DB.table("users").insert({"username": SUPER_ADMIN})
-            print(f"✅ Added Super Admin: {SUPER_ADMIN}")
-        else:
-            print(f"ℹ️ Super Admin {SUPER_ADMIN} already exists")
+    ensure_env_super_admin_users()
 
 
 async def _purge_closed_sessions_loop():
@@ -49,6 +64,12 @@ async def _purge_closed_sessions_loop():
                     n_tx,
                     PURGE_CLOSED_DAYS,
                 )
+            n_idem = await asyncio.to_thread(
+                purge_processed_telegram_updates_older_than_days,
+                IDEM_PURGE_DAYS,
+            )
+            if n_idem:
+                logger.info("Idempotency table purge: removed %s row(s) (>%s days)", n_idem, IDEM_PURGE_DAYS)
         except Exception:
             logger.exception("DB purge failed")
         await asyncio.sleep(PURGE_INTERVAL_SEC)
@@ -105,6 +126,15 @@ async def handle_text_message(update, context):
 
     command = parts[0].lower()
 
+    u_obj = update.effective_user
+    if u_obj and u_obj.username and get_user_role(u_obj.username) == "viewer":
+        viewer_ok = len(parts) == 1 and command in ("help", "data")
+        if not viewer_ok:
+            await update.message.reply_text(
+                "⚠️ Tài khoản viewer chỉ dùng: help, data (chỉ xem phiên nhóm, không ghi +/−)."
+            )
+            return
+
     # Strict validation:
     # - Commands without arguments must be exactly one word (e.g. "start")
     # - Commands with arguments must have at least 2 tokens (e.g. "ckv 10")
@@ -119,12 +149,16 @@ async def handle_text_message(update, context):
         return
 
     # User commands
-    if command == "add_user" and len(parts) >= 2:
+    if command == "add_user":
         await user_handler.add(update, context)
         return
 
     if command == "list_user" and len(parts) == 1:
         await user_handler.list(update, context)
+        return
+
+    if command == "list_viewer" and len(parts) == 1:
+        await user_handler.list_viewer(update, context)
         return
 
     if command == "remove_user" and len(parts) >= 2:
@@ -152,8 +186,8 @@ async def handle_text_message(update, context):
         await session_handler.data(update, context)
         return
 
-    if command == "mo_lai_phien_truoc" and len(parts) == 1:
-        await session_handler.reopen_last_closed(update, context)
+    if command == "mo_lai_phien":
+        await session_handler.reopen_by_business_date(update, context)
         return
 
     if command in ["ckv", "ck"] and len(parts) >= 2:
@@ -181,16 +215,22 @@ async def handle_text_message(update, context):
     await handle_transaction_message(update, context)
 
 async def help_admin(update, context):
+    u = update.effective_user
+    if u and u.username and get_user_role(u.username) == "viewer":
+        await update.message.reply_text("⚠️ Tài khoản viewer không dùng được lệnh này.")
+        return
     await update.message.reply_text(
         "🤖 Supper Admin Command!\n\n"
         "Các lệnh quản lý người dùng:\n"
-        "add_user <username> - Thêm user\n"
+        "add_user <tên> [user|admin|viewer] — thêm user / đổi quyền (mặc định user; admin = admin tổng như add_admin)\n"
         "list_user - Xem danh sách user (không tính admin)\n"
+        "list_viewer - Xem danh sách viewer (role viewer)\n"
         "remove_user <username> - Xóa user\n"
         "add_admin <username> - Thêm admin tổng\n"
         "list_admin - Xem danh sách admin tổng\n"
         "Các lệnh bot:\n"
-        "start, close, data, mo_lai_phien_truoc, ckv, ckr, tigia, tigiax, back\n"
+        "start, close, data, mo_lai_phien dd-mm-yyyy, ckv, ckr, tigia, tigiax, back\n"
+        "User kiểu viewer (super admin cấp): chỉ data + help — không ghi giao dịch, không mở/đóng phiên.\n"
         "Giao dịch nhanh:\n"
         "+số / -số (VND → tính doanh thu)\n"
         "u+số / u-số (USDT trực tiếp; còn lại = doanh thu VND − u- + u+)"
@@ -200,10 +240,10 @@ async def help(update, context):
     await update.message.reply_text(
         "🤖 Bot Command!\n\n"
         "Các lệnh quản lý phiên:\n"
-        "start - Mở phiên mới\n"
+        "start - Mở phiên (một ngày một phiên theo giờ app; bot restart không mất dữ liệu)\n"
         "close - Đóng phiên\n"
         "data - Xem thông tin phiên hiện tại\n"
-        "mo_lai_phien_truoc - Mở lại phiên vừa đóng gần nhất (khi chưa có phiên mở)\n"
+        "mo_lai_phien dd-mm-yyyy - Mở lại phiên đã đóng của ngày đó (chỉnh sửa dữ liệu cũ; đóng phiên hiện tại trước)\n"
         "ckv <giá trị> - Cập nhật chiết khấu vào (%) cho lệnh +\n"
         "ckr <giá trị> - Cập nhật chiết khấu ra (%) cho lệnh -\n"
         "tigia <giá trị> - Cập nhật tỉ giá vào (cho lệnh +)\n"
@@ -213,7 +253,9 @@ async def help(update, context):
         "+1000 để cộng tiền VND\n"
         "-500 để trừ tiền VND\n"
         "u+10 / u-3.5 ghi USDT trực tiếp (không vào dòng doanh thu VND).\n"
-        "Tổng kết: Doanh thu (VND), U+ riêng, U đã thanh toán (u-), Còn lại = doanh thu − u- + u+"
+        "Tổng kết: Doanh thu (VND), U+ riêng, U đã thanh toán (u-), Còn lại = doanh thu − u- + u+\n\n"
+        "<b>Viewer</b> (add_user … viewer): chỉ được <code>data</code> và <code>help</code> — xem phiên đang chạy, không thao tác khác.",
+        parse_mode="HTML",
     ) 
 
 # ===================== MAIN =====================
@@ -223,10 +265,11 @@ def main():
         level=logging.INFO,
     )
     init()
-    token = os.getenv("TOKEN")
+    token = os.getenv("KETOAN_TOKEN")
     app = (
         ApplicationBuilder()
         .token(token)
+        .concurrent_updates(_telegram_concurrent_updates())
         .post_init(post_init)
         .build()
     )
@@ -238,6 +281,7 @@ def main():
     # User 
     app.add_handler(CommandHandler("add_user", user_handler.add))
     app.add_handler(CommandHandler("list_user", user_handler.list))
+    app.add_handler(CommandHandler("list_viewer", user_handler.list_viewer))
     app.add_handler(CommandHandler("remove_user", user_handler.delete))
     app.add_handler(CommandHandler("add_admin", user_handler.add_admin))
     app.add_handler(CommandHandler("list_admin", user_handler.list_admin))
@@ -246,7 +290,7 @@ def main():
     app.add_handler(CommandHandler("start", session_handler.start))
     app.add_handler(CommandHandler("close", session_handler.close))
     app.add_handler(CommandHandler("data", session_handler.data))
-    app.add_handler(CommandHandler("mo_lai_phien_truoc", session_handler.reopen_last_closed))
+    app.add_handler(CommandHandler("mo_lai_phien", session_handler.reopen_by_business_date))
     app.add_handler(CommandHandler("ckv", session_handler.edit_chiet_khau_vao))
     app.add_handler(CommandHandler("ckr", session_handler.edit_chiet_khau_ra))
     app.add_handler(CommandHandler("ck", session_handler.edit_chiet_khau_vao))
@@ -258,7 +302,7 @@ def main():
     app.add_handler(CommandHandler("huy_lenh_truoc", transaction_handler.undo_last))
 
     # Plain text router:
-    # - Recognizes commands like "start", "close", "data", "ckv", "ckr", "tigia", "help", "help_admin"
+    # - Recognizes commands like "start", "close", "data", "mo_lai_phien", "ckv", "ckr", "tigia", "help", "help_admin"
     # - Still supports manual transactions like "+1000", "-500", "u+10", "u-3.5"
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 

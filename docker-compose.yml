@@ -1,9 +1,30 @@
+# Hai process Telegram (cùng .env, cùng PostgreSQL):
+#   - bot        → python bot.py        (KETOAN_TOKEN — bot nhóm thu chi)
+#   - tong_ket_bot → python tong_ket_bot.py (TONG_KET_TOAN_TOKEN — bot tổng kết)
+#
+# Mặc định: `docker compose up -d` chỉ chạy bot nhóm (tránh container restart khi chưa có token tổng kết).
+# Chạy đủ cả hai (cần TONG_KET_TOAN_TOKEN trong .env):
+#   docker compose --profile tongket up -d
+#
+# Muốn compose luôn bật cả hai không cần profile: xóa hai dòng `profiles:` / `- tongket` ở service tong_ket_bot.
+#
+# network_mode: host — DB_HOST=localhost trỏ tới PostgreSQL trên máy host (Linux).
+
 services:
   bot:
     build: .
     restart: unless-stopped
     env_file:
       - .env
-    # Linux: share host network so DB_HOST=localhost works for host PostgreSQL.
     network_mode: host
     command: python bot.py
+
+  tong_ket_bot:
+    profiles:
+      - tongket
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    network_mode: host
+    command: python tong_ket_bot.py

@@ -14,4 +14,5 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
 
+# Mặc định khi `docker run` không kèm command. Với docker-compose xem docker-compose.yml (có thể thêm tong_ket_bot).
 CMD ["python", "bot.py"]

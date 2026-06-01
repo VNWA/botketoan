@@ -1,12 +1,20 @@
+import asyncio
+import logging
+from collections import defaultdict
+
 from telegram import Update
 from telegram.ext import ContextTypes
-from database.models import DB
-from utils import auth_required, now_app
-from datetime import datetime
-from handlers.session import Session, TX_DISPLAY_AFTER_TRADE
-from collections import defaultdict
-import asyncio
 
+from database.models import (
+    DB,
+    telegram_bot_dedupe_key,
+    telegram_update_release_claim,
+    telegram_update_try_claim,
+)
+from handlers.session import Session, TX_DISPLAY_AFTER_TRADE
+from utils import auth_required, deny_if_viewer, now_app
+
+logger = logging.getLogger(__name__)
 
 _CHAT_TX_LOCKS = defaultdict(asyncio.Lock)
 
@@ -35,6 +43,8 @@ class Transaction:
         number: float,
         currency: str = "vnd",
     ):
+        if await deny_if_viewer(update):
+            return
         chat_id = update.effective_chat.id
         async with _CHAT_TX_LOCKS[chat_id]:
             try:
@@ -63,6 +73,17 @@ class Transaction:
                     await update.message.reply_text("⚠️ Vui lòng bắt đầu một phiên trước khi ghi giao dịch.")
                     return
 
+                dedupe_key = telegram_bot_dedupe_key()
+                idem_storage = None
+                uid = getattr(update, "update_id", None)
+                if uid is not None:
+                    ok_idem, idem_storage = telegram_update_try_claim(dedupe_key, uid)
+                    if not ok_idem:
+                        await update.message.reply_text(
+                            "ℹ️ Tin nhắn này đã được xử lý trước đó (Telegram gửi lặp). Không ghi thêm giao dịch."
+                        )
+                        return
+
                 # Không set tỉ giá thì mặc định = 1 (cho cả vào/xuất).
                 session_ti_gia = session.get("ti_gia", 1) or 1
                 session_ti_gia_xuat = session.get("ti_gia_xuat", 1) or 1
@@ -80,82 +101,84 @@ class Transaction:
                     row_ckr = 0
 
                 now = now_app()
-                DB.table("transactions").insert(
-                    {
-                        "session_id": session["id"],
-                        "user_id": db_user["id"],
-                        "type": trans_type,
-                        "amount": number,
-                        "currency": currency,
-                        "ti_gia": tx_ti_gia,
-                        "ti_gia_xuat": tx_ti_gia_xuat,
-                        "chiet_khau_vao": row_ckv,
-                        "chiet_khau_ra": row_ckr,
-                        "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-                    }
-                )
-
-                # Recalculate session totals
-                totals = await Session.calc(session["id"])
-                if not totals:
-                    # Fallback simple message if something goes wrong
-                    symbol = "📈" if sign == "+" else "📉"
-                    unit = "USDT" if currency == "usdt" else "VND"
-                    amount_display = f"{number:,.2f}".rstrip("0").rstrip(".")
-                    await update.message.reply_text(f"{symbol} Ghi nhận giao dịch {sign}{amount_display} {unit} ({trans_type}) thành công.\n")
-                    return
+                try:
+                    DB.table("transactions").insert(
+                        {
+                            "session_id": session["id"],
+                            "user_id": db_user["id"],
+                            "type": trans_type,
+                            "amount": number,
+                            "currency": currency,
+                            "ti_gia": tx_ti_gia,
+                            "ti_gia_xuat": tx_ti_gia_xuat,
+                            "chiet_khau_vao": row_ckv,
+                            "chiet_khau_ra": row_ckr,
+                            "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                    )
+                except Exception:
+                    telegram_update_release_claim(dedupe_key, uid, idem_storage)
+                    raise
+                # Không gọi Session.calc ở đây — tổng phiên cập nhật khi data/close (giảm tải DB).
             except Exception:
                 await update.message.reply_text("⚠️ Có lỗi khi ghi giao dịch. Vui lòng thử lại sau vài giây.")
                 return
 
-        ckv = totals.get("chiet_khau_vao", 0)
-        ckr = totals.get("chiet_khau_ra", 0)
-        real_tong_vao = totals["real_tong_vao"]
-        tong_vao = totals["tong_vao"]
-        tong_ra = totals["tong_ra"]
-        tong_vao_usdt = totals.get("tong_vao_usdt_vnd", totals.get("tong_vao_usdt", 0))
-        tong_ra_usdt = totals.get("tong_ra_usdt_vnd", totals.get("tong_ra_usdt", 0))
-        current_ti_gia = totals.get("ti_gia", 1)
-        current_ti_gia_xuat = totals.get("ti_gia_xuat", 1)
+        # Tin ngắn ngay sau khi INSERT xong. Telegram lag / tin dài hay làm mất phản hồi dù DB đã ghi.
+        amount_display = f"{number:,.2f}".rstrip("0").rstrip(".")
+        unit = "USDT" if currency == "usdt" else "VND"
+        symbol = "📈" if sign == "+" else "📉"
+        try:
+            await update.message.reply_text(
+                f"{symbol} Đã ghi nhận {sign}{amount_display} {unit}. Chi tiết ở tin tiếp theo."
+            )
+        except Exception as e:
+            logger.warning("Không gửi được tin xác nhận ngắn sau khi ghi DB: %s", e)
 
-        # Format chiết khấu để hiển thị đẹp
+        ckv = float(session.get("chiet_khau_vao", session.get("chiet_khau", 0)) or 0)
+        ckr = float(session.get("chiet_khau_ra", 0) or 0)
+        current_ti_gia = float(session.get("ti_gia", 1) or 1)
+        current_ti_gia_xuat = float(session.get("ti_gia_xuat", 1) or 1)
+
         def format_chiet_khau(ck):
             if ck % 1 == 0:
                 return f"{ck:.0f}%"
-            else:
-                return f"{ck:.2f}%".rstrip('0').rstrip('.') + "%"
+            return f"{ck:.2f}%".rstrip("0").rstrip(".") + "%"
+
         ckv_str = format_chiet_khau(ckv)
         ckr_str = format_chiet_khau(ckr)
 
-        # Get formatted transactions list
         transactions_list, _, _ = Session._format_transactions_list(
             session["id"],
             ckv,
             ckr,
-            totals.get("ti_gia", 1),
-            totals.get("ti_gia_xuat", 1),
+            current_ti_gia,
+            current_ti_gia_xuat,
             max_lines=TX_DISPLAY_AFTER_TRADE,
         )
 
-        symbol = "📈" if sign == "+" else "📉"
-
-        amount_display = f"{number:,.2f}".rstrip("0").rstrip(".")
-        unit = "USDT" if currency == "usdt" else "VND"
-        revenue_block = Session.format_revenue_block(totals)
         message = (
-            f"{symbol} Giao dịch {sign}{amount_display} {unit} đã được ghi nhận.\n\n"
+            f"📊 Chi tiết phiên (sau {sign}{amount_display} {unit}):\n\n"
             f"{transactions_list}\n\n"
             f"💱 Tỉ giá vào: {current_ti_gia:,} | Tỉ giá xuất: {current_ti_gia_xuat:,} | CKV: {ckv_str} | CKR: {ckr_str}\n"
-            f"💰 Tổng vào VND → U: {tong_vao:,.0f} VND ({tong_vao_usdt:,.2f} U)\n"
-            f"💸 Tổng chi VND → U: {tong_ra:,.0f} VND ({tong_ra_usdt:,.2f} U)\n"
-            f"💰 Tổng vào sau CKV (VND): {real_tong_vao:,.0f} VND\n"
-            f"{revenue_block}"
+            f"ℹ️ Tổng phiên: gõ data hoặc close."
         )
 
-        await Session._reply_text_safe(update, message)
+        try:
+            await Session._reply_text_safe(update, message)
+        except Exception as e:
+            logger.warning("Không gửi được tin chi tiết sau ghi giao dịch: %s", e)
+            try:
+                await update.message.reply_text(
+                    "⚠️ Giao dịch đã được ghi. Gõ data nếu cần xem tổng hợp đầy đủ (tin chi tiết có thể không gửi được)."
+                )
+            except Exception:
+                pass
 
     @auth_required
     async def undo_last(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if await deny_if_viewer(update):
+            return
         chat_id = update.effective_chat.id
         async with _CHAT_TX_LOCKS[chat_id]:
             username = update.effective_user.username
@@ -176,21 +199,33 @@ class Transaction:
             if not last_tx:
                 return await update.message.reply_text("⚠️ Phiên hiện tại chưa có giao dịch nào để hoàn tác.")
 
-            DB.table("transactions").where("id", last_tx["id"]).delete()
-            totals = await Session.calc(session["id"])
+            dedupe_key = telegram_bot_dedupe_key()
+            idem_storage = None
+            uid = getattr(update, "update_id", None)
+            if uid is not None:
+                ok_idem, idem_storage = telegram_update_try_claim(dedupe_key, uid)
+                if not ok_idem:
+                    return await update.message.reply_text(
+                        "ℹ️ Tin nhắn này đã được xử lý trước đó (Telegram gửi lặp). Không hoàn tác thêm."
+                    )
 
-        if not totals:
-            return await update.message.reply_text("✅ Đã hoàn tác giao dịch gần nhất.")
+            try:
+                DB.table("transactions").where("id", last_tx["id"]).delete()
+            except Exception:
+                telegram_update_release_claim(dedupe_key, uid, idem_storage)
+                logger.exception("Hoàn tác: xóa giao dịch thất bại")
+                return await update.message.reply_text("⚠️ Không hoàn tác được. Thử lại sau vài giây.")
+            # Không gọi Session.calc — tổng cập nhật khi data/close.
 
-        ckv = totals.get("chiet_khau_vao", 0)
-        ckr = totals.get("chiet_khau_ra", 0)
-        current_ti_gia = totals.get("ti_gia", 1)
-        current_ti_gia_xuat = totals.get("ti_gia_xuat", 1)
-        tong_vao = totals.get("tong_vao", 0)
-        tong_ra = totals.get("tong_ra", 0)
-        tong_vao_usdt = totals.get("tong_vao_usdt_vnd", totals.get("tong_vao_usdt", 0))
-        tong_ra_usdt = totals.get("tong_ra_usdt_vnd", totals.get("tong_ra_usdt", 0))
-        revenue_block = Session.format_revenue_block(totals)
+        try:
+            await update.message.reply_text("↩️ Đã hoàn tác giao dịch gần nhất. Chi tiết ở tin tiếp theo.")
+        except Exception as e:
+            logger.warning("Không gửi được tin xác nhận ngắn sau hoàn tác: %s", e)
+
+        ckv = float(session.get("chiet_khau_vao", session.get("chiet_khau", 0)) or 0)
+        ckr = float(session.get("chiet_khau_ra", 0) or 0)
+        current_ti_gia = float(session.get("ti_gia", 1) or 1)
+        current_ti_gia_xuat = float(session.get("ti_gia_xuat", 1) or 1)
 
         transactions_list, _, _ = Session._format_transactions_list(
             session["id"],
@@ -207,11 +242,18 @@ class Transaction:
             return f"{ck:.2f}%".rstrip("0").rstrip(".") + "%"
 
         message = (
-            f"↩️ Đã hoàn tác giao dịch gần nhất: `{self._format_tx_short(last_tx)}`\n\n"
+            f"📊 Chi tiết phiên sau hoàn tác (đã xóa: {self._format_tx_short(last_tx)}):\n\n"
             f"{transactions_list}\n\n"
             f"💱 Tỉ giá vào: {current_ti_gia:,} | Tỉ giá xuất: {current_ti_gia_xuat:,} | CKV: {format_chiet_khau(ckv)} | CKR: {format_chiet_khau(ckr)}\n"
-            f"💰 Tổng vào VND → U: {tong_vao:,.0f} VND ({tong_vao_usdt:,.2f} U)\n"
-            f"💸 Tổng chi VND → U: {tong_ra:,.0f} VND ({tong_ra_usdt:,.2f} U)\n"
-            f"{revenue_block}"
+            f"ℹ️ Tổng phiên: gõ data hoặc close."
         )
-        await Session._reply_text_safe(update, message, parse_mode="Markdown")
+        try:
+            await Session._reply_text_safe(update, message)
+        except Exception as e:
+            logger.warning("Không gửi được tin chi tiết sau hoàn tác: %s", e)
+            try:
+                await update.message.reply_text(
+                    "⚠️ Hoàn tác đã xong. Gõ data nếu cần xem tổng hợp (tin chi tiết có thể không gửi được)."
+                )
+            except Exception:
+                pass

@@ -30,7 +30,7 @@ async def list_groups_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = "📂 Danh sách nhóm:\n"
     for g in groups:
-        text += f"- ID {g[0]}: {g[2]} (Admin ID: {g[1]})\n"
+        text += f"- ID {g[0]}: {g[2]} (Admin: {g[1]}, trạng thái: {g[7]})\n"
     await update.message.reply_text(text)
 
 @role_middleware(["super_admin","admin"])
@@ -122,7 +122,8 @@ async def view_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"- Chiết khấu vào: {g[3]}\n"
         f"- Chiết khấu ra: {g[4]}\n"
         f"- Tỉ giá mua: {g[5]}\n"
-        f"- Tỉ giá bán: {g[6]}"
+        f"- Tỉ giá bán: {g[6]}\n"
+        f"- Trạng thái (theo phiên chat đã gắn): {g[7]}"
     )
     await update.message.reply_text(text)
 @role_middleware(["super_admin","admin"])
