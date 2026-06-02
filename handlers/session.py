@@ -22,6 +22,8 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 MESSAGE_START = os.getenv("MESSAGE_START")
 
+# Sau mỗi lệnh +/- / back: chỉ hiển thị N giao dịch mới nhất (data / close vẫn xem đủ — max_lines=None).
+TX_DISPLAY_AFTER_TRADE = int(os.getenv("TX_DISPLAY_AFTER_TRADE", "3"))
 # Cơ chế an toàn khi phiên quá lớn: data/close sẽ tự động chỉ hiện phần đuôi để tránh treo bot.
 TX_FULL_RENDER_MAX = int(os.getenv("TX_FULL_RENDER_MAX", "500"))
 TX_FULL_RENDER_TAIL = int(os.getenv("TX_FULL_RENDER_TAIL", "150"))
