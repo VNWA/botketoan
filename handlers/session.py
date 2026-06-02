@@ -22,7 +22,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 MESSAGE_START = os.getenv("MESSAGE_START")
 
-# Sau mỗi lệnh +/- / back: chỉ hiển thị N giao dịch mới nhất (data / close vẫn xem đủ — max_lines=None).
+# Sau +/- / back: N dòng giao dịch mới nhất + khối tổng phiên (calc); data/close vẫn xem đủ danh sách.
 TX_DISPLAY_AFTER_TRADE = int(os.getenv("TX_DISPLAY_AFTER_TRADE", "3"))
 # Cơ chế an toàn khi phiên quá lớn: data/close sẽ tự động chỉ hiện phần đuôi để tránh treo bot.
 TX_FULL_RENDER_MAX = int(os.getenv("TX_FULL_RENDER_MAX", "500"))
@@ -153,6 +153,62 @@ class Session:
             f"💵 U+ trực tiếp: {uv:,.2f} U\n"
             f"💸 U đã thanh toán (u-): {ur:,.2f} U\n"
             f"➡️ Còn lại: {cl:,.2f} U"
+        )
+
+    @staticmethod
+    def _display_context(session: dict, totals: dict | None) -> dict:
+        """Gộp session + kết quả calc → tỉ giá, CK, tổng VND→U, dict cho format_revenue_block (dùng data và sau +/-)."""
+        ti_gia = session.get("ti_gia", 1) or 1
+        if ti_gia == 0:
+            ti_gia = 1
+        ti_gia_xuat = session.get("ti_gia_xuat", 1) or 1
+        ckv = session.get("chiet_khau_vao", session.get("chiet_khau", 0))
+        ckr = session.get("chiet_khau_ra", 0)
+        if totals:
+            tong_vao_usdt = totals.get("tong_vao_usdt_vnd", totals.get("tong_vao_usdt", 0))
+            tong_ra_usdt = totals.get("tong_ra_usdt_vnd", totals.get("tong_ra_usdt", 0))
+            ti_gia = totals.get("ti_gia") or ti_gia
+            ti_gia_xuat = totals.get("ti_gia_xuat") or ti_gia_xuat
+            if ti_gia == 0:
+                ti_gia = 1
+            ckv = totals.get("chiet_khau_vao", ckv)
+            ckr = totals.get("chiet_khau_ra", ckr)
+            block_totals = totals
+        else:
+            real_tong_vao = session["tong_vao"] * (100 - ckv) / 100
+            tong_vao_usdt = real_tong_vao / ti_gia if ti_gia != 0 else 0
+            tong_ra_sau_ckr = session["tong_ra"] * (100 + ckr) / 100
+            tong_ra_usdt = tong_ra_sau_ckr / ti_gia if ti_gia != 0 else 0
+            dt_fallback = tong_vao_usdt - tong_ra_usdt
+            block_totals = {
+                "doanh_thu_usdt": dt_fallback,
+                "doanh_thu_vnd": dt_fallback * ti_gia,
+                "usdt_vao": 0,
+                "usdt_ra": 0,
+                "con_lai_u": dt_fallback,
+            }
+        tw = block_totals.get("tong_vao", session["tong_vao"])
+        tr = block_totals.get("tong_ra", session["tong_ra"])
+        return {
+            "ti_gia": ti_gia,
+            "ti_gia_xuat": ti_gia_xuat,
+            "ckv": ckv,
+            "ckr": ckr,
+            "tong_vao_usdt": float(tong_vao_usdt or 0),
+            "tong_ra_usdt": float(tong_ra_usdt or 0),
+            "tw": tw,
+            "tr": tr,
+            "block_totals": block_totals,
+        }
+
+    @staticmethod
+    def _format_totals_lines_from_context(ctx: dict) -> str:
+        return (
+            f"💱 Tỉ giá vào: {ctx['ti_gia']:,} VND/USDT | Tỉ giá xuất: {ctx['ti_gia_xuat']:,} VND/USDT | "
+            f"CKV: {Session._format_chiet_khau(ctx['ckv'])} | CKR: {Session._format_chiet_khau(ctx['ckr'])}\n"
+            f"💰 Tổng vào VND → U: {Session._format_vnd(ctx['tw'])} ({ctx['tong_vao_usdt']:,.2f} U)\n"
+            f"💸 Tổng chi VND → U: {Session._format_vnd(ctx['tr'])} ({ctx['tong_ra_usdt']:,.2f} U)\n"
+            f"{Session.format_revenue_block(ctx['block_totals'])}"
         )
 
     # ================= Xem thông tin phiên =================
@@ -402,41 +458,10 @@ class Session:
 
     # ================= Hàm format thông tin phiên =================
     def _format_session_info(self, session, username, totals=None):
-        ti_gia = session.get('ti_gia', 1)
-        if ti_gia == 0:
-            ti_gia = 1
-        ti_gia_xuat = session.get('ti_gia_xuat', 1) or 1
-        ckv = session.get('chiet_khau_vao', session.get('chiet_khau', 0))
-        ckr = session.get('chiet_khau_ra', 0)
-        if totals:
-            tong_vao_usdt = totals.get("tong_vao_usdt_vnd", totals.get("tong_vao_usdt", 0))
-            tong_ra_usdt = totals.get("tong_ra_usdt_vnd", totals.get("tong_ra_usdt", 0))
-            ti_gia = totals.get("ti_gia") or ti_gia
-            ti_gia_xuat = totals.get("ti_gia_xuat") or ti_gia_xuat
-            if ti_gia == 0:
-                ti_gia = 1
-            ckv = totals.get("chiet_khau_vao", ckv)
-            ckr = totals.get("chiet_khau_ra", ckr)
-        else:
-            real_tong_vao = session['tong_vao'] * (100 - ckv) / 100
-            tong_vao_usdt = real_tong_vao / ti_gia if ti_gia != 0 else 0
-            tong_ra_sau_ckr = session['tong_ra'] * (100 + ckr) / 100
-            tong_ra_usdt = tong_ra_sau_ckr / ti_gia if ti_gia != 0 else 0
-            dt_fallback = tong_vao_usdt - tong_ra_usdt
-            totals = {
-                "doanh_thu_usdt": dt_fallback,
-                "doanh_thu_vnd": dt_fallback * ti_gia,
-                "usdt_vao": 0,
-                "usdt_ra": 0,
-                "con_lai_u": dt_fallback,
-            }
-
+        ctx = Session._display_context(session, totals)
         transactions_list, _, _ = self._format_transactions_list(
-            session['id'], ckv, ckr, ti_gia, ti_gia_xuat, max_lines=None
+            session["id"], ctx["ckv"], ctx["ckr"], ctx["ti_gia"], ctx["ti_gia_xuat"], max_lines=None
         )
-
-        tw = totals.get("tong_vao", session["tong_vao"]) if totals else session["tong_vao"]
-        tr = totals.get("tong_ra", session["tong_ra"]) if totals else session["tong_ra"]
 
         bd_d, bd_m, bd_y = self._session_business_date_parts(session)
         return (
@@ -446,10 +471,7 @@ class Session:
             f"🕒 Thời gian tạo: {session.get('created_at', '—')}\n"
             f"📅 Phiên thuộc ngày (ngày mở): {bd_d}-{bd_m}-{bd_y}\n\n"
             f"{transactions_list}\n\n"
-            f"💱 Tỉ giá vào: {ti_gia:,} VND/USDT | Tỉ giá xuất: {ti_gia_xuat:,} VND/USDT | CKV: {self._format_chiet_khau(ckv)} | CKR: {self._format_chiet_khau(ckr)}\n"
-            f"💰 Tổng vào VND → U: {self._format_vnd(tw)} ({tong_vao_usdt:,.2f} U)\n"
-            f"💸 Tổng chi VND → U: {self._format_vnd(tr)} ({tong_ra_usdt:,.2f} U)\n"
-            f"{self.format_revenue_block(totals)}"
+            f"{Session._format_totals_lines_from_context(ctx)}"
         )
 
     @staticmethod

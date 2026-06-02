@@ -234,7 +234,7 @@ async def help(update, context):
         "+1000 để cộng tiền VND\n"
         "-500 để trừ tiền VND\n"
         "u+10 / u-3.5 ghi USDT trực tiếp (không vào dòng doanh thu VND).\n"
-        "Sau mỗi lệnh +/- hoặc back, bot chỉ gửi vài giao dịch mới nhất (mặc định 3); xem đủ và tổng vào/ra: data hoặc close.\n"
+        "Sau mỗi lệnh +/- hoặc back: vài giao dịch mới nhất (mặc định 3) + tổng phiên (tổng vào/ra, doanh thu U); danh sách đầy đủ: data hoặc close.\n"
         "Tổng kết: Doanh thu (VND), U+ riêng, U đã thanh toán (u-), Còn lại = doanh thu − u- + u+"
     ) 
 
