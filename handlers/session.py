@@ -13,7 +13,7 @@ from database.models import (
     get_current_group,
     get_group,
 )
-from utils import auth_required, deny_if_viewer, is_super_admin, now_app, as_app_tz
+from utils import auth_required, is_super_admin, now_app, as_app_tz
 from datetime import date, datetime
 from dotenv import load_dotenv
 import os
@@ -22,8 +22,6 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 MESSAGE_START = os.getenv("MESSAGE_START")
 
-# Sau mỗi lệnh +/- chỉ hiển thị N giao dịch mới nhất (data / close vẫn xem đủ — max_lines=None).
-TX_DISPLAY_AFTER_TRADE = int(os.getenv("TX_DISPLAY_AFTER_TRADE", "3"))
 # Cơ chế an toàn khi phiên quá lớn: data/close sẽ tự động chỉ hiện phần đuôi để tránh treo bot.
 TX_FULL_RENDER_MAX = int(os.getenv("TX_FULL_RENDER_MAX", "500"))
 TX_FULL_RENDER_TAIL = int(os.getenv("TX_FULL_RENDER_TAIL", "150"))
@@ -75,8 +73,6 @@ class Session:
     # ================= Mở phiên =================
     @auth_required
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if await deny_if_viewer(update):
-            return
         user = update.effective_user
         chat_id = update.effective_chat.id
 
@@ -90,27 +86,8 @@ class Session:
         if DB.table("sessions").where("chat_id", chat_id).where_null("close_at").exists():
             return await update.message.reply_text("⚠️ Nhóm đã có phiên chưa đóng. Đóng phiên cũ trước.")
 
-        # Một ngày (theo APP_TIMEZONE) = một bản ghi phiên: start sau khi close trong ngày mở lại cùng bản ghi, bot restart vẫn đúng.
+        # Luôn tạo phiên mới (trắng). Sau `close`, `start` lại không mở lại dữ liệu phiên cũ — muốn sửa ngày đã đóng dùng `mo_lai_phien`.
         today = now_app().date().isoformat()
-        today_row = (
-            DB.table("sessions")
-            .where("chat_id", chat_id)
-            .where("business_date", today)
-            .first()
-        )
-        if today_row and today_row.get("close_at") is not None:
-            DB.table("sessions").where("id", today_row["id"]).update({"close_at": None})
-            await asyncio.to_thread(compute_session_totals, today_row["id"])
-            set_group_session_status_for_chat(chat_id, "open")
-            reopened = DB.table("sessions").where("id", today_row["id"]).first()
-            totals = await self.calc(today_row["id"])
-            info_message = self._format_session_info(reopened, user.username, totals)
-            await update.message.reply_text(
-                "♻️ Đã mở lại *phiên trong ngày* (một ngày một phiên). Giao dịch trong ngày được giữ nguyên.\n\n"
-                f"{info_message}",
-                parse_mode="Markdown",
-            )
-            return
 
         session_id = DB.table("sessions").insert({
             "chat_id": chat_id,
@@ -131,6 +108,8 @@ class Session:
         await update.message.reply_text(
             f"{MESSAGE_START}, @{user.username}\n\n"
             "✅ Phiên mới đã được tạo thành công!\n"
+            "ℹ️ Mỗi lần `start` sau khi đã `close` là *phiên trắng mới* — không kế thừa giao dịch phiên trước. "
+            "Cần sửa dữ liệu ngày đã đóng: `mo_lai_phien dd-mm-yyyy`.\n\n"
             f"🆔 ID Phiên: {session_id}\n"
             "💱 Tỉ giá vào: 1\n"
             "💱 Tỉ giá xuất: 1\n"
@@ -196,8 +175,6 @@ class Session:
     # ================= Đóng phiên =================
     @auth_required
     async def close(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if await deny_if_viewer(update):
-            return
         chat_id = update.effective_chat.id
         user = update.effective_user
 
@@ -311,8 +288,6 @@ class Session:
     # ================= Mở lại phiên theo ngày mở phiên (dd-mm-yyyy) =================
     @auth_required
     async def reopen_by_business_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if await deny_if_viewer(update):
-            return
         chat_id = update.effective_chat.id
         user = update.effective_user
         args = context.args or []
@@ -365,8 +340,6 @@ class Session:
 
     # ================= Cập nhật chung =================
     async def _update_field(self, update, context, field_name, label, value_type="int", suffix="", min_val=None, max_val=None):
-        if await deny_if_viewer(update):
-            return
         chat_id = update.effective_chat.id
         user = update.effective_user
         db_user = DB.table("users").where("username", user.username).first()

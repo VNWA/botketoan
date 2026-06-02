@@ -11,8 +11,8 @@ from database.models import (
     telegram_update_release_claim,
     telegram_update_try_claim,
 )
-from handlers.session import Session, TX_DISPLAY_AFTER_TRADE
-from utils import auth_required, deny_if_viewer, now_app
+from handlers.session import Session
+from utils import auth_required, now_app
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +43,6 @@ class Transaction:
         number: float,
         currency: str = "vnd",
     ):
-        if await deny_if_viewer(update):
-            return
         chat_id = update.effective_chat.id
         async with _CHAT_TX_LOCKS[chat_id]:
             try:
@@ -119,66 +117,33 @@ class Transaction:
                 except Exception:
                     telegram_update_release_claim(dedupe_key, uid, idem_storage)
                     raise
-                # Không gọi Session.calc ở đây — tổng phiên cập nhật khi data/close (giảm tải DB).
+                # Gọi Session.calc sau khi ghi để tin phản hồi có đủ tổng vào / tổng ra (giống data).
             except Exception:
                 await update.message.reply_text("⚠️ Có lỗi khi ghi giao dịch. Vui lòng thử lại sau vài giây.")
                 return
 
-        # Tin ngắn ngay sau khi INSERT xong. Telegram lag / tin dài hay làm mất phản hồi dù DB đã ghi.
         amount_display = f"{number:,.2f}".rstrip("0").rstrip(".")
         unit = "USDT" if currency == "usdt" else "VND"
         symbol = "📈" if sign == "+" else "📉"
+        tx_prefix = f"u{sign}" if currency == "usdt" else sign
+        username = update.effective_user.username or ""
         try:
-            await update.message.reply_text(
-                f"{symbol} Đã ghi nhận {sign}{amount_display} {unit}. Chi tiết ở tin tiếp theo."
-            )
-        except Exception as e:
-            logger.warning("Không gửi được tin xác nhận ngắn sau khi ghi DB: %s", e)
-
-        ckv = float(session.get("chiet_khau_vao", session.get("chiet_khau", 0)) or 0)
-        ckr = float(session.get("chiet_khau_ra", 0) or 0)
-        current_ti_gia = float(session.get("ti_gia", 1) or 1)
-        current_ti_gia_xuat = float(session.get("ti_gia_xuat", 1) or 1)
-
-        def format_chiet_khau(ck):
-            if ck % 1 == 0:
-                return f"{ck:.0f}%"
-            return f"{ck:.2f}%".rstrip("0").rstrip(".") + "%"
-
-        ckv_str = format_chiet_khau(ckv)
-        ckr_str = format_chiet_khau(ckr)
-
-        transactions_list, _, _ = Session._format_transactions_list(
-            session["id"],
-            ckv,
-            ckr,
-            current_ti_gia,
-            current_ti_gia_xuat,
-            max_lines=TX_DISPLAY_AFTER_TRADE,
-        )
-
-        message = (
-            f"📊 Chi tiết phiên (sau {sign}{amount_display} {unit}):\n\n"
-            f"{transactions_list}\n\n"
-            f"💱 Tỉ giá vào: {current_ti_gia:,} | Tỉ giá xuất: {current_ti_gia_xuat:,} | CKV: {ckv_str} | CKR: {ckr_str}\n"
-            f"ℹ️ Tổng phiên: gõ data hoặc close."
-        )
-
-        try:
+            totals = await Session.calc(session["id"])
+            session = DB.table("sessions").where("id", session["id"]).first() or session
+            block = Session()._format_session_info(session, username, totals)
+            message = f"{symbol} Đã ghi nhận {tx_prefix}{amount_display} {unit}.\n\n{block}"
             await Session._reply_text_safe(update, message)
         except Exception as e:
             logger.warning("Không gửi được tin chi tiết sau ghi giao dịch: %s", e)
             try:
                 await update.message.reply_text(
-                    "⚠️ Giao dịch đã được ghi. Gõ data nếu cần xem tổng hợp đầy đủ (tin chi tiết có thể không gửi được)."
+                    "⚠️ Giao dịch đã được ghi. Gõ data nếu cần xem tổng hợp (tin phản hồi có thể không gửi được)."
                 )
             except Exception:
                 pass
 
     @auth_required
     async def undo_last(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if await deny_if_viewer(update):
-            return
         chat_id = update.effective_chat.id
         async with _CHAT_TX_LOCKS[chat_id]:
             username = update.effective_user.username
@@ -217,43 +182,20 @@ class Transaction:
                 return await update.message.reply_text("⚠️ Không hoàn tác được. Thử lại sau vài giây.")
             # Không gọi Session.calc — tổng cập nhật khi data/close.
 
+        username = update.effective_user.username or ""
         try:
-            await update.message.reply_text("↩️ Đã hoàn tác giao dịch gần nhất. Chi tiết ở tin tiếp theo.")
-        except Exception as e:
-            logger.warning("Không gửi được tin xác nhận ngắn sau hoàn tác: %s", e)
-
-        ckv = float(session.get("chiet_khau_vao", session.get("chiet_khau", 0)) or 0)
-        ckr = float(session.get("chiet_khau_ra", 0) or 0)
-        current_ti_gia = float(session.get("ti_gia", 1) or 1)
-        current_ti_gia_xuat = float(session.get("ti_gia_xuat", 1) or 1)
-
-        transactions_list, _, _ = Session._format_transactions_list(
-            session["id"],
-            ckv,
-            ckr,
-            current_ti_gia,
-            current_ti_gia_xuat,
-            max_lines=TX_DISPLAY_AFTER_TRADE,
-        )
-
-        def format_chiet_khau(ck):
-            if ck % 1 == 0:
-                return f"{ck:.0f}%"
-            return f"{ck:.2f}%".rstrip("0").rstrip(".") + "%"
-
-        message = (
-            f"📊 Chi tiết phiên sau hoàn tác (đã xóa: {self._format_tx_short(last_tx)}):\n\n"
-            f"{transactions_list}\n\n"
-            f"💱 Tỉ giá vào: {current_ti_gia:,} | Tỉ giá xuất: {current_ti_gia_xuat:,} | CKV: {format_chiet_khau(ckv)} | CKR: {format_chiet_khau(ckr)}\n"
-            f"ℹ️ Tổng phiên: gõ data hoặc close."
-        )
-        try:
+            totals = await Session.calc(session["id"])
+            session = DB.table("sessions").where("id", session["id"]).first() or session
+            block = Session()._format_session_info(session, username, totals)
+            message = (
+                f"↩️ Đã hoàn tác giao dịch gần nhất (đã xóa: {self._format_tx_short(last_tx)}).\n\n{block}"
+            )
             await Session._reply_text_safe(update, message)
         except Exception as e:
             logger.warning("Không gửi được tin chi tiết sau hoàn tác: %s", e)
             try:
                 await update.message.reply_text(
-                    "⚠️ Hoàn tác đã xong. Gõ data nếu cần xem tổng hợp (tin chi tiết có thể không gửi được)."
+                    "⚠️ Hoàn tác đã xong. Gõ data nếu cần xem tổng hợp (tin phản hồi có thể không gửi được)."
                 )
             except Exception:
                 pass

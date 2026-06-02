@@ -97,7 +97,6 @@ def get_user_role(username: str) -> str:
     """
     super_admin — biến .env hoặc bảng admins.
     admin — user là chủ ít nhất một nhóm (groups.admin_user_id).
-    viewer — cột users.role = viewer (chỉ xem phiên: data / help).
     user — mặc định.
     """
     if not username:
@@ -110,13 +109,7 @@ def get_user_role(username: str) -> str:
     uid = row["id"]
     if DB.table("groups").where("admin_user_id", uid).exists():
         return "admin"
-    if (row.get("role") or "user").strip().lower() == "viewer":
-        return "viewer"
     return "user"
-
-
-def is_viewer(username: str) -> bool:
-    return bool(username) and get_user_role(username) == "viewer"
 
 
 def role_middleware(allowed_roles):
@@ -142,17 +135,3 @@ def role_middleware(allowed_roles):
         return wrapper
 
     return decorator
-
-
-async def deny_if_viewer(update: Update) -> bool:
-    """
-    True nếu user là viewer và đã gửi tin từ chối — handler nên return ngay.
-    """
-    user = update.effective_user
-    if not user or not user.username or not is_viewer(user.username):
-        return False
-    if update.message:
-        await update.message.reply_text(
-            "⚠️ Tài khoản viewer chỉ xem phiên: lệnh data, help (không ghi +/−, không mở/đóng/sửa phiên)."
-        )
-    return True

@@ -11,15 +11,14 @@ class User:
         args = list(context.args or [])
         if not args:
             return await update.message.reply_text(
-                "⚠️ Dùng lệnh: /add_user <tên> [user|admin|viewer]\n"
+                "⚠️ Dùng lệnh: /add_user <tên> [user|admin]\n"
                 "Ví dụ:\n"
                 "• /add_user linganh  → user thường\n"
-                "• /add_user ling anh viewer  → tên «ling anh», chỉ xem data/help\n"
-                "• /add_user thinh admin  → admin tổng (bảng admins, như add_admin)\n"
-                "Token cuối nếu là user / admin / viewer thì là role; mặc định không truyền = user."
+                "• /add_user ling anh admin  → admin tổng (bảng admins, như add_admin)\n"
+                "Token cuối nếu là user / admin thì là role; mặc định không truyền = user."
             )
 
-        valid_roles = frozenset(("user", "admin", "viewer"))
+        valid_roles = frozenset(("user", "admin"))
         if args[-1].strip().lower() in valid_roles and len(args) >= 2:
             role_arg = args[-1].strip().lower()
             name_tokens = args[:-1]
@@ -31,14 +30,12 @@ class User:
         if not username:
             return await update.message.reply_text("⚠️ Username không hợp lệ.")
 
-        # Chỉ super admin mới được thêm / đổi user
         if not is_super_admin(update.effective_user.username):
             return await update.message.reply_text("❌ Bạn không có quyền thực hiện lệnh này.")
 
         existing = DB.table("users").where("username", username).first()
         if not existing:
-            initial = "viewer" if role_arg == "viewer" else "user"
-            DB.table("users").insert({"username": username, "role": initial})
+            DB.table("users").insert({"username": username})
 
         if role_arg == "admin":
             set_user_role(username, "user")
@@ -46,13 +43,6 @@ class User:
                 DB.table("admins").insert({"username": username})
             await update.message.reply_text(
                 f"✅ @{username} — <b>admin tổng</b> (đã ghi bảng admins, quyền như /add_admin).",
-                parse_mode="HTML",
-            )
-        elif role_arg == "viewer":
-            set_user_role(username, "viewer")
-            DB.table("admins").where("username", username).delete()
-            await update.message.reply_text(
-                f"✅ @{username} — role <b>viewer</b> (chỉ data/help; đã gỡ admin tổng nếu có).",
                 parse_mode="HTML",
             )
         else:
@@ -83,32 +73,9 @@ class User:
         if not regular_users:
             return await update.message.reply_text("📭 Chưa có user nào (không tính admin).")
 
-        text = "👑 Danh sách user:\n" + "\n".join(
-            [
-                f"- @{u['username']}"
-                + (" (viewer — chỉ xem data/help)" if (u.get("role") or "").lower() == "viewer" else "")
-                for u in regular_users
-            ]
-        )
+        text = "👑 Danh sách user:\n" + "\n".join(f"- @{u['username']}" for u in regular_users)
 
         await update.message.reply_text(text)
-
-    @staticmethod
-    @auth_required
-    async def list_viewer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not is_super_admin(update.effective_user.username):
-            return await update.message.reply_text("❌ Bạn không có quyền thực hiện lệnh này.")
-
-        rows = DB.table("users").where("role", "viewer").order_by("username", "ASC").get()
-        viewers = [u for u in (rows or []) if u.get("username")]
-
-        if not viewers:
-            return await update.message.reply_text("📭 Chưa có tài khoản viewer nào.")
-
-        text = "👀 <b>Danh sách viewer</b> (chỉ data / help):\n" + "\n".join(
-            f"- @{u['username']}" for u in viewers
-        )
-        await update.message.reply_text(text, parse_mode="HTML")
 
     @staticmethod
     @auth_required

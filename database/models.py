@@ -828,7 +828,8 @@ def aggregate_business_date_rows(target_date):
 
 def list_closed_sessions_for_business_date(target_date):
     """
-    Phiên đã đóng (close_at NOT NULL) thuộc ngày nghiệp vụ target_date.
+    Phiên đã đóng (close_at NOT NULL) thuộc ngày nghiệp vụ target_date (mọi bản ghi).
+    Bot tổng kết ngày dùng list_last_closed_session_per_chat_for_business_date (mỗi nhóm một phiên).
     """
     from datetime import date as date_type
 
@@ -852,9 +853,42 @@ def list_closed_sessions_for_business_date(target_date):
         put_conn(conn)
 
 
+def list_last_closed_session_per_chat_for_business_date(target_date):
+    """
+    Với mỗi chat_id trong ngày nghiệp vụ: chỉ lấy **một** phiên đã đóng — bản có id lớn nhất
+    (phiên tạo sau cùng trong các phiên đã đóng của ngày đó). Dùng cho tổng kết ngày.
+    """
+    from datetime import date as date_type
+
+    if not isinstance(target_date, date_type):
+        raise TypeError("list_last_closed_session_per_chat_for_business_date expects datetime.date")
+    conn = get_conn()
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            """
+            SELECT id, chat_id, close_at, created_at, business_date
+            FROM (
+                SELECT DISTINCT ON (chat_id)
+                    id, chat_id, close_at, created_at, business_date
+                FROM "sessions"
+                WHERE close_at IS NOT NULL
+                  AND COALESCE(business_date, (created_at::timestamp)::date) = %s
+                ORDER BY chat_id, id DESC
+            ) sub
+            ORDER BY chat_id
+            """,
+            (target_date,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        put_conn(conn)
+
+
 def aggregate_closed_vnd_for_tongket_day(target_date):
     """
-    Phiên đã đóng trong ngày nghiệp vụ: gộp theo chat rồi cộng toàn hệ thống.
+    Phiên đã đóng trong ngày nghiệp vụ: **mỗi nhóm (chat_id) chỉ lấy một phiên** — phiên có id
+    lớn nhất trong ngày (phiên tạo sau cùng trong các phiên đã đóng), rồi cộng toàn hệ thống.
 
     Công thức tổng kết (bot tổng kế toán, sau khi bạn nhập giá U thực tế `gia_u_set` trong UI):
     - **Tổng vào hiện tại (U)** = Σ `tong_vao_usdt_vnd` — đúng số U trong ngoặc của dòng
@@ -875,7 +909,7 @@ def aggregate_closed_vnd_for_tongket_day(target_date):
     if not isinstance(target_date, date_type):
         raise TypeError("aggregate_closed_vnd_for_tongket_day expects datetime.date")
 
-    rows = list_closed_sessions_for_business_date(target_date)
+    rows = list_last_closed_session_per_chat_for_business_date(target_date)
     if not rows:
         return {
             "tong_vao_hien_tai_u": 0.0,
@@ -1102,11 +1136,11 @@ def get_user(username):
 
 def set_user_role(username: str, role: str) -> int:
     """
-    Cập nhật role trong bảng users (không dùng QueryBuilder.update vì bảng users không có updated_at).
-    role: 'user' | 'viewer'. Trả về số dòng cập nhật.
+    Cập nhật cột users.role (raw SQL — bảng users không có updated_at nên không dùng QueryBuilder.update).
+    Chỉ hỗ trợ role 'user' (đồng bộ sau add_user / gỡ viewer cũ trong DB).
     """
-    if role not in ("user", "viewer"):
-        raise ValueError("role must be 'user' or 'viewer'")
+    if role != "user":
+        raise ValueError("role must be 'user'")
     conn = get_conn()
     try:
         cur = conn.cursor()

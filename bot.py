@@ -13,7 +13,7 @@ from database.models import (
 from handlers.user import User
 from handlers.session import Session
 from handlers.transaction import Transaction
-from utils import ensure_env_super_admin_users, get_user_role
+from utils import ensure_env_super_admin_users
 
 load_dotenv()
 PURGE_CLOSED_DAYS = int(os.getenv("PURGE_CLOSED_DAYS", "3"))
@@ -126,15 +126,6 @@ async def handle_text_message(update, context):
 
     command = parts[0].lower()
 
-    u_obj = update.effective_user
-    if u_obj and u_obj.username and get_user_role(u_obj.username) == "viewer":
-        viewer_ok = len(parts) == 1 and command in ("help", "data")
-        if not viewer_ok:
-            await update.message.reply_text(
-                "⚠️ Tài khoản viewer chỉ dùng: help, data (chỉ xem phiên nhóm, không ghi +/−)."
-            )
-            return
-
     # Strict validation:
     # - Commands without arguments must be exactly one word (e.g. "start")
     # - Commands with arguments must have at least 2 tokens (e.g. "ckv 10")
@@ -155,10 +146,6 @@ async def handle_text_message(update, context):
 
     if command == "list_user" and len(parts) == 1:
         await user_handler.list(update, context)
-        return
-
-    if command == "list_viewer" and len(parts) == 1:
-        await user_handler.list_viewer(update, context)
         return
 
     if command == "remove_user" and len(parts) >= 2:
@@ -215,22 +202,16 @@ async def handle_text_message(update, context):
     await handle_transaction_message(update, context)
 
 async def help_admin(update, context):
-    u = update.effective_user
-    if u and u.username and get_user_role(u.username) == "viewer":
-        await update.message.reply_text("⚠️ Tài khoản viewer không dùng được lệnh này.")
-        return
     await update.message.reply_text(
         "🤖 Supper Admin Command!\n\n"
         "Các lệnh quản lý người dùng:\n"
-        "add_user <tên> [user|admin|viewer] — thêm user / đổi quyền (mặc định user; admin = admin tổng như add_admin)\n"
+        "add_user <tên> [user|admin] — thêm user / đổi quyền (mặc định user; admin = admin tổng như add_admin)\n"
         "list_user - Xem danh sách user (không tính admin)\n"
-        "list_viewer - Xem danh sách viewer (role viewer)\n"
         "remove_user <username> - Xóa user\n"
         "add_admin <username> - Thêm admin tổng\n"
         "list_admin - Xem danh sách admin tổng\n"
         "Các lệnh bot:\n"
         "start, close, data, mo_lai_phien dd-mm-yyyy, ckv, ckr, tigia, tigiax, back\n"
-        "User kiểu viewer (super admin cấp): chỉ data + help — không ghi giao dịch, không mở/đóng phiên.\n"
         "Giao dịch nhanh:\n"
         "+số / -số (VND → tính doanh thu)\n"
         "u+số / u-số (USDT trực tiếp; còn lại = doanh thu VND − u- + u+)"
@@ -240,7 +221,7 @@ async def help(update, context):
     await update.message.reply_text(
         "🤖 Bot Command!\n\n"
         "Các lệnh quản lý phiên:\n"
-        "start - Mở phiên (một ngày một phiên theo giờ app; bot restart không mất dữ liệu)\n"
+        "start - Mở phiên mới (sau `close`, `start` lại = phiên trắng, không kế thừa giao dịch phiên cũ; sửa ngày đã đóng: mo_lai_phien)\n"
         "close - Đóng phiên\n"
         "data - Xem thông tin phiên hiện tại\n"
         "mo_lai_phien dd-mm-yyyy - Mở lại phiên đã đóng của ngày đó (chỉnh sửa dữ liệu cũ; đóng phiên hiện tại trước)\n"
@@ -253,9 +234,8 @@ async def help(update, context):
         "+1000 để cộng tiền VND\n"
         "-500 để trừ tiền VND\n"
         "u+10 / u-3.5 ghi USDT trực tiếp (không vào dòng doanh thu VND).\n"
-        "Tổng kết: Doanh thu (VND), U+ riêng, U đã thanh toán (u-), Còn lại = doanh thu − u- + u+\n\n"
-        "<b>Viewer</b> (add_user … viewer): chỉ được <code>data</code> và <code>help</code> — xem phiên đang chạy, không thao tác khác.",
-        parse_mode="HTML",
+        "Sau mỗi lệnh +/- hoặc back, bot gửi lại đủ danh sách giao dịch và tổng vào / tổng ra / doanh thu (như data).\n"
+        "Tổng kết: Doanh thu (VND), U+ riêng, U đã thanh toán (u-), Còn lại = doanh thu − u- + u+"
     ) 
 
 # ===================== MAIN =====================
@@ -281,7 +261,6 @@ def main():
     # User 
     app.add_handler(CommandHandler("add_user", user_handler.add))
     app.add_handler(CommandHandler("list_user", user_handler.list))
-    app.add_handler(CommandHandler("list_viewer", user_handler.list_viewer))
     app.add_handler(CommandHandler("remove_user", user_handler.delete))
     app.add_handler(CommandHandler("add_admin", user_handler.add_admin))
     app.add_handler(CommandHandler("list_admin", user_handler.list_admin))
