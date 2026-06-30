@@ -1,7 +1,7 @@
 from telegram import Update
 from telegram.ext import ContextTypes
 from database.models import DB, set_user_role
-from utils import is_super_admin, auth_required, SUPER_ADMIN, SUPER_ADMIN2
+from utils import is_super_admin, auth_required, SUPER_ADMIN, SUPER_ADMIN2, SUPER_ADMIN3
 
 
 class User:
@@ -159,6 +159,10 @@ class User:
             low2 = SUPER_ADMIN2.lower()
             if not any(low2 == e[0] for e in env_supers):
                 env_supers.append((low2, SUPER_ADMIN2))
+        if SUPER_ADMIN3:
+            low3 = SUPER_ADMIN3.lower()
+            if not any(low3 == e[0] for e in env_supers):
+                env_supers.append((low3, SUPER_ADMIN3))
 
         if not admins and not env_supers:
             return await update.message.reply_text("📭 Chưa có admin tổng nào.")

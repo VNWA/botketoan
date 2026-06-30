@@ -15,7 +15,14 @@ from dotenv import load_dotenv
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from database.models import init_db
-from handlers.tong_ket_ui import cmd_help, cmd_start, on_gia_u_message, tongket_callback
+from handlers.tong_ket_ui import (
+    cmd_help,
+    cmd_start,
+    cmd_tong_thang,
+    on_gia_u_message,
+    tong_thang_callback,
+    tongket_callback,
+)
 from utils import ensure_env_super_admin_users
 
 load_dotenv()
@@ -33,6 +40,16 @@ def _telegram_concurrent_updates_tongket():
         return max(1, min(int(raw), 64))
     except ValueError:
         return 12
+
+
+async def on_tong_ket_text(update, context):
+    if not update.message or not update.message.text:
+        return
+    text = update.message.text.strip().lower()
+    if text in ("tong_thang", "/tong_thang"):
+        await cmd_tong_thang(update, context)
+        return
+    await on_gia_u_message(update, context)
 
 
 def main() -> None:
@@ -56,8 +73,10 @@ def main() -> None:
     app = ApplicationBuilder().token(token).concurrent_updates(_telegram_concurrent_updates_tongket()).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("tong_thang", cmd_tong_thang))
     app.add_handler(CallbackQueryHandler(tongket_callback, pattern=r"^tk:"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_gia_u_message))
+    app.add_handler(CallbackQueryHandler(tong_thang_callback, pattern=r"^tt:"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_tong_ket_text))
     print("Bot tổng kế toán đang chạy (menu /start)...")
     app.run_polling()
 

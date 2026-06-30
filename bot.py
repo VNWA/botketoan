@@ -3,13 +3,14 @@ import logging
 import os
 import re
 from dotenv import load_dotenv
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 from database.models import (
     init_db,
     DB,
     purge_closed_sessions_older_than_days,
     purge_processed_telegram_updates_older_than_days,
 )
+from handlers.tong_ket_ui import cmd_tong_thang, tong_thang_callback
 from handlers.user import User
 from handlers.session import Session
 from handlers.transaction import Transaction
@@ -169,6 +170,10 @@ async def handle_text_message(update, context):
         await session_handler.close(update, context)
         return
 
+    if command == "closeday" and len(parts) == 1:
+        await session_handler.closeday(update, context)
+        return
+
     if command == "data" and len(parts) == 1:
         await session_handler.data(update, context)
         return
@@ -197,6 +202,10 @@ async def handle_text_message(update, context):
         await transaction_handler.undo_last(update, context)
         return
 
+    if command == "tong_thang" and len(parts) == 1:
+        await cmd_tong_thang(update, context)
+        return
+
     # If the text is not a valid command, try to treat it as a transaction.
     # Supported: +number, -number, u+number, u-number
     await handle_transaction_message(update, context)
@@ -211,7 +220,7 @@ async def help_admin(update, context):
         "add_admin <username> - Thêm admin tổng\n"
         "list_admin - Xem danh sách admin tổng\n"
         "Các lệnh bot:\n"
-        "start, close, data, mo_lai_phien dd-mm-yyyy, ckv, ckr, tigia, tigiax, back\n"
+        "start, close, closeday, data, mo_lai_phien dd-mm-yyyy, ckv, ckr, tigia, tigiax, back\n"
         "Giao dịch nhanh:\n"
         "+số / -số (VND → tính doanh thu)\n"
         "u+số / u-số (USDT trực tiếp; còn lại = doanh thu VND − u- + u+)"
@@ -223,13 +232,15 @@ async def help(update, context):
         "Các lệnh quản lý phiên:\n"
         "start - Mở phiên mới (sau `close`, `start` lại = phiên trắng, không kế thừa giao dịch phiên cũ; sửa ngày đã đóng: mo_lai_phien)\n"
         "close - Đóng phiên\n"
+        "closeday - Đóng phiên chuẩn (đánh dấu để tính tong_thang trên bot tổng kế toán)\n"
         "data - Xem thông tin phiên hiện tại\n"
         "mo_lai_phien dd-mm-yyyy - Mở lại phiên đã đóng của ngày đó (chỉnh sửa dữ liệu cũ; đóng phiên hiện tại trước)\n"
         "ckv <giá trị> - Cập nhật chiết khấu vào (%) cho lệnh +\n"
         "ckr <giá trị> - Cập nhật chiết khấu ra (%) cho lệnh -\n"
         "tigia <giá trị> - Cập nhật tỉ giá vào (cho lệnh +)\n"
         "tigiax <giá trị> - Cập nhật tỉ giá xuất cho lệnh trừ\n\n"
-        "back - Hoàn tác giao dịch gần nhất (+, -, u+, u-)\n\n"
+        "back - Hoàn tác giao dịch gần nhất (+, -, u+, u-)\n"
+        "tong_thang - Tổng kết tháng (phiên chuẩn closeday), chọn khoảng ngày\n\n"
         "Hoặc nhập trực tiếp:\n"
         "+1000 để cộng tiền VND\n"
         "-500 để trừ tiền VND\n"
@@ -268,6 +279,7 @@ def main():
     # Session 
     app.add_handler(CommandHandler("start", session_handler.start))
     app.add_handler(CommandHandler("close", session_handler.close))
+    app.add_handler(CommandHandler("closeday", session_handler.closeday))
     app.add_handler(CommandHandler("data", session_handler.data))
     app.add_handler(CommandHandler("mo_lai_phien", session_handler.reopen_by_business_date))
     app.add_handler(CommandHandler("ckv", session_handler.edit_chiet_khau_vao))
@@ -279,6 +291,8 @@ def main():
     app.add_handler(CommandHandler("back", transaction_handler.undo_last))
     app.add_handler(CommandHandler("undo", transaction_handler.undo_last))
     app.add_handler(CommandHandler("huy_lenh_truoc", transaction_handler.undo_last))
+    app.add_handler(CommandHandler("tong_thang", cmd_tong_thang))
+    app.add_handler(CallbackQueryHandler(tong_thang_callback, pattern=r"^tt:"))
 
     # Plain text router:
     # - Recognizes commands like "start", "close", "data", "mo_lai_phien", "ckv", "ckr", "tigia", "help", "help_admin"

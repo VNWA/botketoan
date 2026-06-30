@@ -347,6 +347,15 @@ def _run_init_db_migrations(cur):
     except Exception:
         pass
 
+    # Phiên chuẩn: đóng bằng lệnh closeday (dùng cho tong_thang)
+    cur.execute(
+        'ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_standard_close BOOLEAN NOT NULL DEFAULT FALSE'
+    )
+    cur.execute(
+        'CREATE INDEX IF NOT EXISTS idx_sessions_standard_close_bdate ON "sessions" '
+        '("is_standard_close", "business_date") WHERE "close_at" IS NOT NULL AND "is_standard_close" = TRUE'
+    )
+
     cur.execute(
         'CREATE INDEX IF NOT EXISTS idx_sessions_chat_business_date ON "sessions" ("chat_id", "business_date")'
     )
@@ -883,6 +892,141 @@ def list_last_closed_session_per_chat_for_business_date(target_date):
         return [dict(r) for r in cur.fetchall()]
     finally:
         put_conn(conn)
+
+
+def list_standard_closed_sessions_in_range(start_date, end_date):
+    """
+    Phiên đã đóng bằng closeday (is_standard_close) trong khoảng ngày mở phiên [start_date, end_date].
+    """
+    from datetime import date as date_type
+
+    if not isinstance(start_date, date_type) or not isinstance(end_date, date_type):
+        raise TypeError("list_standard_closed_sessions_in_range expects datetime.date")
+    if start_date > end_date:
+        return []
+    conn = get_conn()
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            """
+            SELECT id, chat_id, close_at, created_at, business_date, is_standard_close
+            FROM "sessions"
+            WHERE close_at IS NOT NULL
+              AND is_standard_close = TRUE
+              AND COALESCE(business_date, (created_at::timestamp)::date) >= %s
+              AND COALESCE(business_date, (created_at::timestamp)::date) <= %s
+            ORDER BY COALESCE(business_date, (created_at::timestamp)::date), chat_id, id
+            """,
+            (start_date, end_date),
+        )
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        put_conn(conn)
+
+
+        put_conn(conn)
+
+
+def _session_business_date_value(row: dict):
+    from datetime import date as date_type, datetime as dt_type
+
+    bd = row.get("business_date")
+    if bd is not None:
+        if isinstance(bd, date_type):
+            return bd
+        if isinstance(bd, dt_type):
+            return bd.date()
+        try:
+            return dt_type.strptime(str(bd).strip()[:10], "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    created_at_raw = row.get("created_at")
+    if isinstance(created_at_raw, dt_type):
+        return created_at_raw.date()
+    return dt_type.strptime(str(created_at_raw), "%Y-%m-%d %H:%M:%S").date()
+
+
+def aggregate_standard_sessions_in_range(start_date, end_date):
+    """
+    Tổng hợp phiên chuẩn (closeday) trong khoảng ngày mở phiên.
+    Trả về: start_date, end_date, so_phien, tong_vao, tong_ra, by_date (chi tiết theo ngày).
+    """
+    from collections import defaultdict
+    from datetime import date as date_type
+
+    if not isinstance(start_date, date_type) or not isinstance(end_date, date_type):
+        raise TypeError("aggregate_standard_sessions_in_range expects datetime.date")
+
+    rows = list_standard_closed_sessions_in_range(start_date, end_date)
+    if not rows:
+        return {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "so_phien": 0,
+            "tong_vao": 0.0,
+            "tong_ra": 0.0,
+            "by_date": [],
+        }
+
+    by_date = defaultdict(list)
+    for r in rows:
+        by_date[_session_business_date_value(r)].append(r)
+
+    chat_ids = list({int(r["chat_id"]) for r in rows})
+    names = logical_group_names_for_chat_ids(chat_ids)
+
+    tong_vao = 0.0
+    tong_ra = 0.0
+    by_date_out = []
+
+    for d in sorted(by_date.keys()):
+        day_tot = None
+        sessions_out = []
+        for r in by_date[d]:
+            sid = int(r["id"])
+            cid = int(r["chat_id"])
+            t = compute_session_totals(sid)
+            if not t:
+                continue
+            tv = float(t.get("tong_vao", 0) or 0)
+            tr = float(t.get("tong_ra", 0) or 0)
+            tong_vao += tv
+            tong_ra += tr
+
+            raw_nm = (names.get(cid) or "").strip()
+            label = raw_nm or f"Nhóm chat {cid}"
+            sessions_out.append(
+                {
+                    "session_id": sid,
+                    "label": label,
+                    "ckv": float(t.get("chiet_khau_vao", 0) or 0),
+                    "ckr": float(t.get("chiet_khau_ra", 0) or 0),
+                    "tong_vao": tv,
+                    "tong_ra": tr,
+                    "tong_vao_usdt": float(t.get("tong_vao_usdt_vnd", 0) or 0),
+                    "tong_ra_usdt": float(t.get("tong_ra_usdt_vnd", 0) or 0),
+                    "doanh_thu_usdt": float(t.get("doanh_thu_usdt", 0) or 0),
+                }
+            )
+            day_tot = _merge_totals_dict(day_tot, t)
+
+        if sessions_out:
+            by_date_out.append(
+                {
+                    "date": d,
+                    "sessions": sessions_out,
+                    "day_totals": day_tot,
+                }
+            )
+
+    return {
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "so_phien": len(rows),
+        "tong_vao": tong_vao,
+        "tong_ra": tong_ra,
+        "by_date": by_date_out,
+    }
 
 
 def aggregate_closed_vnd_for_tongket_day(target_date):

@@ -15,10 +15,12 @@ from telegram.ext import ContextTypes
 
 from database.models import (
     aggregate_closed_vnd_for_tongket_day,
+    aggregate_standard_sessions_in_range,
     get_tongket_row,
     tongket_upsert,
 )
 from handlers.session import Session
+from tong_ket_mirror import split_telegram_text_chunks
 from utils import now_app
 
 logger = logging.getLogger(__name__)
@@ -51,7 +53,7 @@ def _parse_ymd(s: str) -> date:
     return datetime.strptime(s, "%Y%m%d").date()
 
 
-def build_date_keyboard(page: int) -> InlineKeyboardMarkup:
+def build_date_keyboard(page: int, prefix: str = "tk") -> InlineKeyboardMarkup:
     all_d = _all_dates()
     tp = total_pages()
     page = max(0, min(page, tp - 1))
@@ -61,13 +63,13 @@ def build_date_keyboard(page: int) -> InlineKeyboardMarkup:
         row = []
         for j in range(i, min(i + 2, len(chunk))):
             d = chunk[j]
-            row.append(InlineKeyboardButton(_fmt_d(d), callback_data=f"tk:d:{_ymd(d)}"))
+            row.append(InlineKeyboardButton(_fmt_d(d), callback_data=f"{prefix}:d:{_ymd(d)}"))
         rows.append(row)
     nav: list[InlineKeyboardButton] = []
     if page > 0:
-        nav.append(InlineKeyboardButton("⬅️ Trước", callback_data=f"tk:p:{page - 1}"))
+        nav.append(InlineKeyboardButton("⬅️ Trước", callback_data=f"{prefix}:p:{page - 1}"))
     if page < tp - 1:
-        nav.append(InlineKeyboardButton("Sau ➡️", callback_data=f"tk:p:{page + 1}"))
+        nav.append(InlineKeyboardButton("Sau ➡️", callback_data=f"{prefix}:p:{page + 1}"))
     if nav:
         rows.append(nav)
     return InlineKeyboardMarkup(rows)
@@ -125,6 +127,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🤖 <b>Bot tổng kế toán</b>\n\n"
         "• /start — chọn ngày (nút), nhập <b>giá U thực tế</b> khi được hỏi; nếu ngày đã có tongket: "
         "<b>Có</b> = nhập giá mới, <b>Không</b> = giữ giá U đã lưu và cập nhật lại số theo phiên.\n"
+        "• /tong_thang — tổng kết theo khoảng ngày (chọn ngày bắt đầu → ngày kết thúc); "
+        "chỉ tính <b>phiên chuẩn</b> (nhóm đóng bằng lệnh <code>closeday</code> trên bot nhóm).\n"
         "• Chỉ lấy phiên <b>đã đóng</b> (<code>close_at</code> có giá trị) đúng ngày mở phiên; "
         "<b>mỗi nhóm chỉ tính một phiên</b> — phiên có id lớn nhất trong ngày (phiên tạo sau cùng trong các phiên đã đóng của ngày đó).\n"
         "• <b>Tổng vào hiện tại (U)</b> = cộng số U trong ngoặc của dòng «Tổng vào VND → U» trên tin close từng nhóm (theo tỉ giá/CK từng phiên).\n"
@@ -419,3 +423,214 @@ async def on_gia_u_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     save_mode = "insert" if mode == "insert" else "update"
     lines = _lines_tongket_saved(ngay, gia, fields, save_mode)
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+# ===================== Tổng kết tháng (phiên chuẩn / closeday) =====================
+
+
+def _format_ck_pct(value: float) -> str:
+    if float(value) % 1 == 0:
+        return f"{float(value):.0f}%"
+    return f"{float(value):.2f}%".rstrip("0").rstrip(".") + "%"
+
+
+def _format_tong_thang_summary(agg: dict) -> list[str]:
+    start_s = _fmt_d(date.fromisoformat(agg["start_date"]))
+    end_s = _fmt_d(date.fromisoformat(agg["end_date"]))
+    so_phien = int(agg.get("so_phien") or 0)
+
+    if so_phien == 0:
+        return [
+            f"📊 <b>TỔNG KẾT THÁNG</b> ({start_s} → {end_s})",
+            "",
+            "⚠️ Không có phiên chuẩn (closeday) trong khoảng này.",
+            "",
+            "<i>Gõ /tong_thang để chọn khoảng khác.</i>",
+        ]
+
+    tv = float(agg.get("tong_vao", 0) or 0)
+
+    lines = [
+        f"📊 <b>TỔNG KẾT THÁNG</b> ({start_s} → {end_s})",
+        f"Số phiên chuẩn: <code>{so_phien}</code>",
+        "",
+        f"💰 Tổng vào: <code>{Session._format_vnd(tv)}</code>",
+        "",
+        "──────────",
+        "<b>Chi tiết theo ngày</b>",
+        "",
+    ]
+
+    for day_block in agg.get("by_date") or []:
+        d: date = day_block["date"]
+        ds = _fmt_d(d)
+        lines.append(f"📆 <b>{ds}</b>")
+        for sess in day_block.get("sessions") or []:
+            label = html.escape(str(sess.get("label") or "—"), quote=False)
+            sid = int(sess.get("session_id") or 0)
+            ckv = float(sess.get("ckv") or 0)
+            ckr = float(sess.get("ckr") or 0)
+            stv = float(sess.get("tong_vao") or 0)
+            str_ = float(sess.get("tong_ra") or 0)
+            stv_u = float(sess.get("tong_vao_usdt") or 0)
+            str_u = float(sess.get("tong_ra_usdt") or 0)
+            sdt = float(sess.get("doanh_thu_usdt") or 0)
+            lines.append(
+                f"  ▸ <b>Phiên #{sid}</b> — {label}\n"
+                f"     CKV: <code>{_format_ck_pct(ckv)}</code> | CKR: <code>{_format_ck_pct(ckr)}</code>\n"
+                f"     💰 Vào: <code>{Session._format_vnd(stv)}</code> (<code>{stv_u:,.2f}</code> U)\n"
+                f"     💸 Chi: <code>{Session._format_vnd(str_)}</code> (<code>{str_u:,.2f}</code> U)\n"
+                f"     📊 Doanh thu: <code>{sdt:,.2f}</code> USDT"
+            )
+
+        day_tot = day_block.get("day_totals") or {}
+        if day_tot:
+            dtv = float(day_tot.get("tong_vao", 0) or 0)
+            dtr = float(day_tot.get("tong_ra", 0) or 0)
+            dtv_u = float(day_tot.get("tong_vao_usdt_vnd", 0) or 0)
+            dtr_u = float(day_tot.get("tong_ra_usdt_vnd", 0) or 0)
+            ddt = float(day_tot.get("doanh_thu_usdt", 0) or 0)
+            lines.append(
+                f"  📊 <b>Tổng ngày {ds}</b>: "
+                f"vào <code>{Session._format_vnd(dtv)}</code> (<code>{dtv_u:,.2f}</code> U) — "
+                f"chi <code>{Session._format_vnd(dtr)}</code> (<code>{dtr_u:,.2f}</code> U) — "
+                f"doanh thu <code>{ddt:,.2f}</code> USDT"
+            )
+        lines.append("")
+
+    lines.append("<i>Gõ /tong_thang để chọn khoảng khác.</i>")
+    return lines
+
+
+async def _reply_tong_thang_result(q, agg: dict) -> None:
+    lines = _format_tong_thang_summary(agg)
+    text = "\n".join(lines)
+    chunks = split_telegram_text_chunks(text)
+    await _safe_edit(q, chunks[0], reply_markup=None, parse_mode="HTML")
+    for part in chunks[1:]:
+        await q.message.reply_text(part, parse_mode="HTML")
+
+
+def build_tong_thang_start_keyboard(page: int) -> InlineKeyboardMarkup:
+    kb = build_date_keyboard(page, prefix="tt:s")
+    rows = list(kb.inline_keyboard)
+    rows.append([InlineKeyboardButton("❌ Hủy", callback_data="tt:x")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_tong_thang_end_keyboard(page: int) -> InlineKeyboardMarkup:
+    kb = build_date_keyboard(page, prefix="tt:e")
+    rows = list(kb.inline_keyboard)
+    rows.append([InlineKeyboardButton("❌ Hủy", callback_data="tt:x")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cmd_tong_thang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    if not msg:
+        return
+    context.user_data.pop("tong_thang_wait", None)
+    context.user_data.pop("tongket_wait", None)
+    tp = total_pages()
+    try:
+        await msg.reply_text(
+            "📅 <b>Tổng kết tháng — phiên chuẩn (closeday)</b>\n\n"
+            "Bước 1/2: Chọn <b>ngày bắt đầu</b> khoảng tính toán.\n"
+            f"<i>Danh sách ~{MONTHS_BACK} tháng gần nhất, trang 1/{tp}</i>",
+            reply_markup=build_tong_thang_start_keyboard(0),
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.exception("cmd_tong_thang reply failed")
+        await msg.reply_text("⚠️ Không gửi được menu tổng kết tháng. Thử lại sau vài giây.")
+
+
+async def tong_thang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q or not q.data:
+        return
+    await q.answer()
+    parts = q.data.split(":")
+    if len(parts) < 2 or parts[0] != "tt":
+        return
+    tag = parts[1]
+
+    if tag == "x":
+        context.user_data.pop("tong_thang_wait", None)
+        await _safe_edit(q, "Đã hủy tổng kết tháng. Gõ /tong_thang hoặc /start.", reply_markup=None)
+        return
+
+    if tag == "s" and parts[2] == "p" and len(parts) == 4:
+        page = int(parts[3])
+        tp = total_pages()
+        page = max(0, min(page, tp - 1))
+        await _safe_edit(
+            q,
+            "📅 <b>Tổng kết tháng — phiên chuẩn</b>\n\n"
+            "Bước 1/2: Chọn <b>ngày bắt đầu</b>.\n"
+            f"<i>Trang {page + 1}/{tp}</i>",
+            reply_markup=build_tong_thang_start_keyboard(page),
+            parse_mode="HTML",
+        )
+        return
+
+    if tag == "s" and parts[2] == "d" and len(parts) == 4:
+        start_d = _parse_ymd(parts[3])
+        context.user_data["tong_thang_wait"] = {"start": start_d}
+        tp = total_pages()
+        await _safe_edit(
+            q,
+            "📅 <b>Tổng kết tháng — phiên chuẩn</b>\n\n"
+            f"Đã chọn bắt đầu: <b>{_fmt_d(start_d)}</b>\n\n"
+            "Bước 2/2: Chọn <b>ngày kết thúc</b>.\n"
+            f"<i>Trang 1/{tp}</i>",
+            reply_markup=build_tong_thang_end_keyboard(0),
+            parse_mode="HTML",
+        )
+        return
+
+    if tag == "e" and parts[2] == "p" and len(parts) == 4:
+        w = context.user_data.get("tong_thang_wait") or {}
+        if not w.get("start"):
+            await _safe_edit(q, "⚠️ Phiên chọn đã hết hạn. Gõ /tong_thang để bắt đầu lại.", reply_markup=None)
+            return
+        page = int(parts[3])
+        tp = total_pages()
+        page = max(0, min(page, tp - 1))
+        start_d = w["start"]
+        await _safe_edit(
+            q,
+            "📅 <b>Tổng kết tháng — phiên chuẩn</b>\n\n"
+            f"Ngày bắt đầu: <b>{_fmt_d(start_d)}</b>\n\n"
+            "Bước 2/2: Chọn <b>ngày kết thúc</b>.\n"
+            f"<i>Trang {page + 1}/{tp}</i>",
+            reply_markup=build_tong_thang_end_keyboard(page),
+            parse_mode="HTML",
+        )
+        return
+
+    if tag == "e" and parts[2] == "d" and len(parts) == 4:
+        w = context.user_data.get("tong_thang_wait") or {}
+        start_d = w.get("start")
+        if not start_d:
+            await _safe_edit(q, "⚠️ Phiên chọn đã hết hạn. Gõ /tong_thang để bắt đầu lại.", reply_markup=None)
+            return
+        end_d = _parse_ymd(parts[3])
+        if end_d < start_d:
+            await _safe_edit(
+                q,
+                f"⚠️ Ngày kết thúc <b>{_fmt_d(end_d)}</b> phải ≥ ngày bắt đầu <b>{_fmt_d(start_d)}</b>.\n"
+                "Chọn lại ngày kết thúc:",
+                reply_markup=build_tong_thang_end_keyboard(0),
+                parse_mode="HTML",
+            )
+            return
+        try:
+            agg = await asyncio.to_thread(aggregate_standard_sessions_in_range, start_d, end_d)
+        except Exception:
+            logger.exception("aggregate_standard_sessions_in_range")
+            await _safe_edit(q, "⚠️ Lỗi khi đọc DB / tính phiên chuẩn.", reply_markup=None)
+            return
+        context.user_data.pop("tong_thang_wait", None)
+        await _reply_tong_thang_result(q, agg)
+        return

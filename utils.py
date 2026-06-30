@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 SUPER_ADMIN = os.getenv("SUPER_ADMIN")
 SUPER_ADMIN2 = os.getenv("SUPER_ADMIN2")
+SUPER_ADMIN3 = os.getenv("SUPER_ADMIN3")
 
 # Múi giờ hiển thị / ghi close_at, created_at, giao dịch (mặc định VN). Tránh server UTC làm lệch ngày "Chốt ngày".
 _APP_TZ_NAME = os.getenv("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
@@ -38,16 +39,22 @@ def is_super_admin(username: str) -> bool:
         return True
     if SUPER_ADMIN2 and u == SUPER_ADMIN2.lower():
         return True
+    if SUPER_ADMIN3 and u == SUPER_ADMIN3.lower():
+        return True
     # Admin tổng trong DB
     return DB.table("admins").where("username", username).exists()
 
 
 def ensure_env_super_admin_users() -> None:
     """
-    Đảm bảo user trong DB cho SUPER_ADMIN và SUPER_ADMIN2 (.env) nếu đặt tên và chưa có.
+    Đảm bảo user trong DB cho SUPER_ADMIN / SUPER_ADMIN2 / SUPER_ADMIN3 (.env) nếu đặt tên và chưa có.
     Gọi sau init_db() từ bot nhóm hoặc bot tổng kết.
     """
-    for label, raw in (("SUPER_ADMIN", SUPER_ADMIN), ("SUPER_ADMIN2", SUPER_ADMIN2)):
+    for label, raw in (
+        ("SUPER_ADMIN", SUPER_ADMIN),
+        ("SUPER_ADMIN2", SUPER_ADMIN2),
+        ("SUPER_ADMIN3", SUPER_ADMIN3),
+    ):
         name = (raw or "").strip()
         if not name:
             continue

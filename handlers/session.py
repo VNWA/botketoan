@@ -126,9 +126,10 @@ class Session:
             "- Gõ `+1000` / `-500` để ghi giao dịch VND\n"
             "- Gõ `u+10` / `u-3.5` để ghi USDT trực tiếp (không tính vào doanh thu VND; xem dòng U+ / U đã thanh toán / Còn lại)\n"
             "- Gõ `data` để xem tổng kết tạm thời\n"
-            "- Gõ `close` để đóng phiên\n\n"
+            "- Gõ `close` để đóng phiên\n"
+            "- Gõ `closeday` để đóng phiên *chuẩn* (dùng cho tổng kết tháng)\n\n"
             "- Gõ `mo_lai_phien dd-mm-yyyy` để mở lại phiên một ngày đã đóng (sửa dữ liệu cũ; phải `close` phiên hiện tại trước)\n\n"
-            "👉 Có thể dùng cả `/start`, `/ckv`, `/ckr`, `/tigia`, `/tigiax`, `/back`, `/data`, `/close`, `/mo_lai_phien` hoặc không có dấu `/` đều được.\n"
+            "👉 Có thể dùng cả `/start`, `/ckv`, `/ckr`, `/tigia`, `/tigiax`, `/back`, `/data`, `/close`, `/closeday`, `/mo_lai_phien` hoặc không có dấu `/` đều được.\n"
             "ℹ️ Gõ `help` để xem đầy đủ danh sách lệnh.",
             parse_mode="Markdown"
         )
@@ -232,7 +233,12 @@ class Session:
 
     # ================= Đóng phiên =================
     @auth_required
-    async def close(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def closeday(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Đóng phiên và đánh dấu là phiên chuẩn (is_standard_close) — dùng cho tong_thang."""
+        await self.close(update, context, standard_close=True)
+
+    @auth_required
+    async def close(self, update: Update, context: ContextTypes.DEFAULT_TYPE, standard_close: bool = False):
         chat_id = update.effective_chat.id
         user = update.effective_user
 
@@ -242,7 +248,12 @@ class Session:
             return await update.message.reply_text("⚠️ Không tìm thấy phiên đang mở.")
 
         close_time = now_app()
-        DB.table("sessions").where("id", session["id"]).update({"close_at": close_time.strftime("%Y-%m-%d %H:%M:%S")})
+        DB.table("sessions").where("id", session["id"]).update(
+            {
+                "close_at": close_time.strftime("%Y-%m-%d %H:%M:%S"),
+                "is_standard_close": bool(standard_close),
+            }
+        )
         set_group_session_status_for_chat(chat_id, "closed")
 
         # Handle both string and datetime for created_at (naive trong DB = giờ APP_TIMEZONE)
@@ -283,8 +294,11 @@ class Session:
         tr = totals["tong_ra"] if totals else session["tong_ra"]
 
         bd_d, bd_m, bd_y = self._session_business_date_parts(session)
+        close_title = "✅ Phiên chuẩn đã được đóng thành công!" if standard_close else "✅ Phiên đã được đóng thành công!"
+        chuan_note = "\n🏷 Đã đánh dấu *phiên chuẩn* (closeday) — sẽ được tính trong `tong_thang`.\n" if standard_close else ""
         info_message = (
-            f"✅ Phiên đã được đóng thành công!\n\n"
+            f"{close_title}\n"
+            f"{chuan_note}\n"
             f"📊 Thông tin phiên\n"
             f"🆔 ID Phiên: {session['id']}\n"
             f"👤 Người tạo: @{user.username}\n"
@@ -383,7 +397,7 @@ class Session:
                 f"⚠️ Phiên ngày {target.day:02d}-{target.month:02d}-{target.year} đang mở rồi. Gõ `data` để xem."
             )
 
-        DB.table("sessions").where("id", row["id"]).update({"close_at": None})
+        DB.table("sessions").where("id", row["id"]).update({"close_at": None, "is_standard_close": False})
         set_group_session_status_for_chat(chat_id, "open")
 
         totals = await self.calc(row["id"])
